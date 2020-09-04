@@ -19,6 +19,7 @@ var maxValue = os.Getenv("MAX_VALUE")
 type Repository struct {
 	User        string
 	Name        string
+	Description string `json:description`
 	PullCount   int    `json:"pull_count"`
 	StarCount   int    `json:"star_count"`
 	Lastupdated string `json:"last_updated"`
@@ -57,12 +58,66 @@ func NewDB(connString string) (*DB, error) {
 func FindSub(check []string, item string) bool {
 	found := false
 	for _, v := range check {
-		if strings.Contains(item, v) {
+
+		if strings.Contains(strings.ToLower(item), v) {
 			found = true
 		}
 	}
 	return found
 }
+
+func SortValues(resultStruct User) map[string][]Repository {
+	sortMap := map[string][]Repository{
+		"consul":    make([]Repository, 0),
+		"packer":    make([]Repository, 0),
+		"nomad":     make([]Repository, 0),
+		"terraform": make([]Repository, 0),
+		"vagrant":   make([]Repository, 0),
+		"vault":     make([]Repository, 0),
+		"other":     make([]Repository, 0),
+	}
+	// keywords that indicate a peripherals container, not the product
+	keepKeys := []string{"official", "first-class", "automatic", "builds", "source", "jsii"}
+
+	for _, repo := range resultStruct.Results {
+		productLoops := 0
+
+		for product, slice := range sortMap {
+			productLoops = productLoops + 1
+			found := FindSub(keepKeys, repo.Description)
+
+			// if a repo description doesn't contain any of the keywords for a blessed
+			// image or the name doesn't include "enterprise", mark as other & end loop
+			if !found && !strings.Contains(repo.Name, "enterprise") {
+				other := append(sortMap["other"], repo)
+				sortMap["other"] = other
+				break
+			}
+
+			// for repos idenitfied as blessed, save to appropriate
+			// core product slice
+			if strings.Contains(repo.Name, product) {
+				repo.CoreProduct = product
+				slice = append(slice, repo)
+				sortMap[product] = slice
+			}
+		}
+	}
+	return sortMap
+}
+
+func CheckMap(resultStruct User, sortedMap map[string][]Repository) {
+	// Count sorted repos to verify all are accounted for
+	total := 0
+	for _, slice := range sortedMap {
+		total = total + len(slice)
+	}
+	if total != resultStruct.Count {
+		fmt.Printf("Verification failure: sorted repository count does not match full count of Hashicorp dockerhub repositories. \n Sourted Count: %d, Hashicorp Repos:%d \n\n", total, resultStruct.Count)
+	}
+	fmt.Printf("%+v\n", sortedMap)
+}
+
 func main() {
 	userURL := registryBaseURL + "repositories/hashicorp/?page_size=" + maxValue
 
@@ -76,66 +131,7 @@ func main() {
 	}
 
 	hashiUser := User{}
-
 	json.Unmarshal(b, &hashiUser)
-	productMap := map[string][]Repository{
-		"consul":    make([]Repository, 0),
-		"packer":    make([]Repository, 0),
-		"nomad":     make([]Repository, 0),
-		"terraform": make([]Repository, 0),
-		"vagrant":   make([]Repository, 0),
-		"vault":     make([]Repository, 0),
-		"other":     make([]Repository, 0),
-	}
-	// keywords that indicate a peripherals container, not the product
-	dropKeys := []string{
-		"replicate",
-		"template",
-		"env",
-		"controller",
-		"website",
-		"broker",
-		"driver",
-		"demo",
-		"logging",
-		"autoscaler",
-		"spark",
-	}
-
-	// sort repos into core product groups
-	for _, repo := range hashiUser.Results {
-		productLoops := 0
-
-		for product, slice := range productMap {
-			productLoops = productLoops + 1
-
-			if found := FindSub(dropKeys, repo.Name); found {
-				other := append(productMap["other"], repo)
-				productMap["other"] = other
-				break
-			}
-
-			if strings.Contains(repo.Name, product) {
-				repo.CoreProduct = product
-				slice = append(slice, repo)
-				productMap[product] = slice
-				break
-			}
-
-			if productLoops > 6 {
-				other := append(productMap["other"], repo)
-				productMap["other"] = other
-			}
-		}
-
-	}
-	// Count sorted repos to verify all are accounted for
-	total := 0
-	for _, slice := range productMap {
-		total = total + len(slice)
-	}
-	if total != hashiUser.Count {
-		fmt.Printf("Verification failure: sorted repository count does not match full count of Hashicorp dockerhub repositories. \n Sourted Count: %d, Hashicorp Repos:%d \n\n", total, hashiUser.Count)
-	}
-	fmt.Printf("%+v\n", productMap)
+	productMap := SortValues(hashiUser)
+	CheckMap(hashiUser, productMap)
 }
