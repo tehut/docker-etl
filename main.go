@@ -76,7 +76,7 @@ func SortValues(resultStruct User) map[string][]Repository {
 		"vault":     make([]Repository, 0),
 		"other":     make([]Repository, 0),
 	}
-	// keywords that indicate a peripherals container, not the product
+	//whitelist of keywords that indicate a core product container
 	keepKeys := []string{"official", "first-class", "automatic", "builds", "source", "jsii"}
 
 	for _, repo := range resultStruct.Results {
@@ -106,21 +106,22 @@ func SortValues(resultStruct User) map[string][]Repository {
 	return sortMap
 }
 
-func CheckMap(resultStruct User, sortedMap map[string][]Repository) {
+func CheckMap(resultStruct User, sortedMap map[string][]Repository) error {
 	// Count sorted repos to verify all are accounted for
 	total := 0
 	for _, slice := range sortedMap {
 		total = total + len(slice)
 	}
 	if total != resultStruct.Count {
-		fmt.Printf("Verification failure: sorted repository count does not match full count of Hashicorp dockerhub repositories. \n Sourted Count: %d, Hashicorp Repos:%d \n\n", total, resultStruct.Count)
+		err := fmt.Errorf("verification failure: sorted repository count does not match full count of Hashicorp dockerhub repositories. \n Sourted Count: %d, Hashicorp Repos:%d \n\n", total, resultStruct.Count)
+		return err
 	}
-	fmt.Printf("%+v\n", sortedMap)
+	fmt.Printf("%+v\n", sortedMap) // for debugging, temporary
+	return nil
 }
 
 func main() {
 	userURL := registryBaseURL + "repositories/hashicorp/?page_size=" + maxValue
-
 	resp, err := retryablehttp.Get(userURL)
 	if err != nil {
 		fmt.Println(err.Error())
@@ -133,5 +134,5 @@ func main() {
 	hashiUser := User{}
 	json.Unmarshal(b, &hashiUser)
 	productMap := SortValues(hashiUser)
-	CheckMap(hashiUser, productMap)
+	fmt.Println(CheckMap(hashiUser, productMap))
 }
