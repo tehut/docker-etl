@@ -1,20 +1,26 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"os"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/jinzhu/gorm"
+	_ "github.com/jinzhu/gorm/dialects/postgres"
+	_ "github.com/lib/pq"
 )
 
-const registryBaseURL = "https://hub.docker.com/v2/"
+const (
+	registryBaseURL = "https://hub.docker.com/v2/"
+	connString      = "postgres://statuser:dev@localhost/dockerstats?sslmode=disable" //postgres:/localhost/dockerstats?sslmode=disable"
+)
 
-var maxValue = os.Getenv("MAX_VALUE")
+var maxValue = "100" //os.Getenv("MAX_VALUE")
 
 type Repository struct {
 	User        string
@@ -35,24 +41,27 @@ type DB struct {
 	*gorm.DB
 }
 
-func NewDB(connString string) (*DB, error) {
-	var outErr error
-	for x := 0; x < 3; x++ {
-		time.Sleep(time.Second)
-		db, err := gorm.Open("postgres", connString)
-		if err != nil {
-			outErr = err
-			continue
-		}
-		if err = db.DB().Ping(); err != nil {
-			outErr = err
-			continue
-		}
-		return &DB{
-			DB: db,
-		}, nil
+func NewDB(connString string) (*sql.DB, error) {
+	const (
+		host     = "localhost"
+		port     = 5432
+		user     = "statuser"
+		password = "dev"
+		dbname   = "dockerstats"
+	)
+
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+"password=%s dbname=%s sslmode=disable",
+		host, port, user, password, dbname)
+
+	// "statuser:dev@localhost/dockerstats?sslmode=disable" -- not clear why this connection string
+	// is failing with ssl mode not enabled
+	// ("postgres",	"statuser:dev@localhost/dockerstats?sslmode=disable"
+	db, err := sql.Open("postgres", psqlInfo)
+	if err != nil {
+		return nil, err
 	}
-	return nil, outErr
+
+	return db, nil
 }
 
 func FindSub(check []string, item string) bool {
@@ -83,7 +92,7 @@ func SortValues(resultStruct User) map[string][]Repository {
 		productLoops := 0
 
 		for product, slice := range sortMap {
-			productLoops = productLoops + 1
+			productLoops++
 			found := FindSub(keepKeys, repo.Description)
 
 			// if a repo description doesn't contain any of the keywords for a blessed
@@ -116,10 +125,46 @@ func CheckMap(resultStruct User, sortedMap map[string][]Repository) error {
 		err := fmt.Errorf("verification failure: sorted repository count does not match full count of Hashicorp dockerhub repositories. \n Sourted Count: %d, Hashicorp Repos:%d \n\n", total, resultStruct.Count)
 		return err
 	}
-	fmt.Printf("%+v\n", sortedMap) // for debugging, temporary
+	//fmt.Printf("%+v\n", sortedMap) // for debugging, temporary
 	return nil
 }
 
+func InsertData(repo Repository, trans *sql.Tx, now string) error {
+	var updated *string
+	if len(repo.Lastupdated) <= 1 {
+		updated = nil
+	} else {
+		updated = &repo.Lastupdated
+	}
+
+	_, err := trans.Exec("INSERT INTO docker(repo_name, pull_count, star_count, last_updated, recorded_date, core_product) VALUES ($1, $2, $3, $4, $5, $6)",
+		repo.Name, repo.PullCount, repo.StarCount, updated, now, repo.CoreProduct)
+
+	if err != nil {
+		trans.Rollback()
+		log.Fatal(err)
+		return nil
+	}
+	return nil
+}
+func runInserts(productMap map[string][]Repository, db *sql.DB) {
+	time := time.Now().UTC().Format(time.RFC3339)
+	fmt.Println(time)
+	tx, err := db.Begin()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, array := range productMap {
+		for _, list := range array {
+			InsertData(list, tx, time)
+		}
+	}
+	tx.Commit()
+	tx.Commit()
+
+	return
+}
 func main() {
 	userURL := registryBaseURL + "repositories/hashicorp/?page_size=" + maxValue
 	resp, err := retryablehttp.Get(userURL)
@@ -134,5 +179,37 @@ func main() {
 	hashiUser := User{}
 	json.Unmarshal(b, &hashiUser)
 	productMap := SortValues(hashiUser)
-	fmt.Println(CheckMap(hashiUser, productMap))
+	err = CheckMap(hashiUser, productMap)
+	if err != nil {
+		fmt.Println(err)
+	}
+	db, err := NewDB(connString)
+	if err != nil {
+		log.Fatal(err)
+	}
+	runInserts(productMap, db)
+
+	var (
+		name        string
+		pullCount   int
+		starCount   int
+		lastUpdated string
+	)
+	rows, err := db.Query("SELECT * FROM docker")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		err := rows.Scan(&name, &pullCount, &starCount, &lastUpdated)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf(" %s, %s, %s, %s\n", name, pullCount, starCount, lastUpdated)
+	}
+	err = rows.Err()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 }
